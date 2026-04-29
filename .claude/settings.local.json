@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(where:*)",
+      "Bash(node --version:*)",
+      "Bash(npm:*)",
+      "Bash(npx tsc:*)",
+      "Bash(powershell -Command \"Get-Service *mysql*\":*)",
+      "Bash(powershell -Command \"Get-Service *maria*\")",
+      "Bash(pip install:*)",
+      "Bash(yt-dlp:*)",
+      "Bash(npx ts-node:*)",
+      "Bash(ffmpeg:*)",
+      "Bash(winget install:*)",
+      "Bash(python -c:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(docker:*)",
+      "Bash(curl:*)"
+    ]
+  }
+}
