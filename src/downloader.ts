@@ -1,9 +1,10 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { join } from "path";
-import { unlink, unlinkSync, mkdirSync, existsSync, readdirSync } from "fs";
+import { unlink, unlinkSync, mkdirSync, existsSync, readdirSync, statSync, renameSync, rmdirSync } from "fs";
 import { randomUUID } from "crypto";
 import { VideoFormat, DownloadResult } from "./types";
+import { isTikTok, isInstagram } from "./link-detector";
 
 interface YtDlpFormat {
   format_id: string;
@@ -42,12 +43,18 @@ export async function listFormats(url: string): Promise<VideoFormat[]> {
     const resolution = `${f.height}p`;
     const existing = resolutionMap.get(resolution);
 
+    const isVideoOnly = f.vcodec !== "none" && f.acodec === "none";
     const isVideoWithAudio = f.acodec !== "none" && f.vcodec !== "none";
     const isMp4 = (f.ext === "mp4" || f.video_ext === "mp4");
 
+    // Build complete yt-dlp format spec so audio is always included
+    const formatSpec = isVideoOnly
+      ? `${f.format_id}+bestaudio`
+      : String(f.format_id);
+
     if (!existing) {
       resolutionMap.set(resolution, {
-        formatId: String(f.format_id),
+        formatId: formatSpec,
         resolution,
         ext: f.ext || "mp4",
         filesize: f.filesize || f.filesize_approx,
@@ -55,7 +62,7 @@ export async function listFormats(url: string): Promise<VideoFormat[]> {
     } else {
       if (isVideoWithAudio && isMp4) {
         resolutionMap.set(resolution, {
-          formatId: String(f.format_id),
+          formatId: formatSpec,
           resolution,
           ext: f.ext || "mp4",
           filesize: f.filesize || f.filesize_approx,
@@ -90,17 +97,35 @@ export async function downloadMedia(
   ];
 
   if (formatId) {
-    args.push("-f", `${formatId}+bestaudio/best`);
+    // formatId is a complete yt-dlp format spec (e.g. "137+bestaudio" or "18")
+    args.push("-f", formatId);
+  }
+
+  // Route only TikTok through the proxy (e.g. Tor) — other platforms work directly
+  // and the proxy adds latency. Set YTDLP_PROXY in .env to enable.
+  const proxy = process.env.YTDLP_PROXY;
+  if (proxy && isTikTok(url)) {
+    args.unshift("--proxy", proxy);
+  }
+
+  // Instagram increasingly requires login. If a cookies file is configured, pass it.
+  const igCookies = process.env.INSTAGRAM_COOKIES;
+  if (igCookies && isInstagram(url) && existsSync(igCookies)) {
+    args.unshift("--cookies", igCookies);
   }
 
   args.push(url);
 
+  let ytdlpStderr: string | null = null;
   try {
     await execFileAsync("yt-dlp", args, {
       timeout: 120_000,
     });
-  } catch {
-    // yt-dlp may exit non-zero on max-filesize abort — check for output below
+  } catch (err: unknown) {
+    // yt-dlp may exit non-zero on max-filesize abort but still leave a complete file —
+    // we still check for output below; remember stderr in case there's none.
+    const e = err as { stderr?: string; message?: string };
+    ytdlpStderr = (e.stderr || e.message || String(err)).toString().trim();
   }
 
   // Find the downloaded file by UUID prefix, ignore .part files
@@ -113,36 +138,98 @@ export async function downloadMedia(
   }
 
   if (completeFiles.length === 0) {
-    throw new Error("File too large or download failed.");
+    // yt-dlp produced nothing — try gallery-dl as a fallback for posts that
+    // contain photos/audio/etc. instead of video (Instagram photo posts, Twitter
+    // image tweets, etc.).
+    try {
+      return await tryGalleryDl(url, uid);
+    } catch {
+      const detail = ytdlpStderr
+        ? ytdlpStderr.split("\n").reverse().find((l) => l.startsWith("ERROR:")) || ytdlpStderr
+        : null;
+      throw new Error(detail ? detail.slice(0, 250) : "File too large or download failed.");
+    }
   }
 
   const filePath = join(TEMP_DIR, completeFiles[0]);
-  const ext = completeFiles[0].split(".").pop()?.toLowerCase() || "";
-  let mediaType: DownloadResult["mediaType"];
+  return { filePath, mediaType: detectMediaType(completeFiles[0]) };
+}
 
+function detectMediaType(filename: string): DownloadResult["mediaType"] {
+  const ext = filename.split(".").pop()?.toLowerCase() || "";
   switch (ext) {
     case "mp3":
     case "m4a":
     case "ogg":
     case "wav":
     case "opus":
-      mediaType = "audio";
-      break;
+      return "audio";
     case "gif":
-      mediaType = "animation";
-      break;
+      return "animation";
     case "mp4":
     case "mkv":
     case "webm":
     case "mov":
-      mediaType = "video";
-      break;
+      return "video";
+    case "jpg":
+    case "jpeg":
+    case "png":
+    case "webp":
+    case "heic":
+      return "photo";
     default:
-      mediaType = "document";
-      break;
+      return "document";
+  }
+}
+
+// Fallback for sites where yt-dlp finds no video. gallery-dl handles photo posts,
+// carousels, audio-only posts, etc. Downloads to a per-uid subdirectory, picks
+// the first file, moves it next to other temp files for the standard cleanup.
+async function tryGalleryDl(url: string, uid: string): Promise<DownloadResult> {
+  const subdir = join(TEMP_DIR, `gd-${uid}`);
+  mkdirSync(subdir, { recursive: true });
+
+  const args = ["-D", subdir, url];
+  const proxy = process.env.YTDLP_PROXY;
+  if (proxy && isTikTok(url)) {
+    args.unshift("--proxy", proxy);
+  }
+  const igCookies = process.env.INSTAGRAM_COOKIES;
+  if (igCookies && isInstagram(url) && existsSync(igCookies)) {
+    args.unshift("--cookies", igCookies);
   }
 
-  return { filePath, mediaType };
+  let ranOk = false;
+  try {
+    await execFileAsync("gallery-dl", args, { timeout: 120_000 });
+    ranOk = true;
+  } catch {
+    // gallery-dl may also leave partial files — fall through and check what's present
+  }
+
+  let files: string[] = [];
+  try {
+    files = readdirSync(subdir);
+  } catch {}
+
+  if (files.length === 0) {
+    try { rmdirSync(subdir); } catch {}
+    throw new Error(ranOk ? "gallery-dl produced no files" : "gallery-dl failed");
+  }
+
+  // Move the first file out of the subdir so the standard cleanupFile() works,
+  // then drop the subdir + any extras (Instagram carousels, etc.).
+  const first = files[0];
+  const ext = first.split(".").pop() || "bin";
+  const finalPath = join(TEMP_DIR, `${uid}.${ext}`);
+  renameSync(join(subdir, first), finalPath);
+
+  for (const f of files.slice(1)) {
+    try { unlinkSync(join(subdir, f)); } catch {}
+  }
+  try { rmdirSync(subdir); } catch {}
+
+  return { filePath: finalPath, mediaType: detectMediaType(first) };
 }
 
 export async function cleanupFile(filePath: string): Promise<void> {
@@ -151,4 +238,29 @@ export async function cleanupFile(filePath: string): Promise<void> {
   } catch {
     // swallow
   }
+}
+
+// Sweep stale leftovers (orphaned .part files, files from a crash, etc.).
+// Files newer than maxAgeMs are skipped to avoid touching in-flight downloads.
+export function startTempSweep(
+  intervalMs: number = 60 * 60 * 1000,
+  maxAgeMs: number = 30 * 60 * 1000
+): NodeJS.Timeout {
+  const sweep = () => {
+    try {
+      const now = Date.now();
+      for (const f of readdirSync(TEMP_DIR)) {
+        const p = join(TEMP_DIR, f);
+        try {
+          const stat = statSync(p);
+          if (now - stat.mtimeMs > maxAgeMs) {
+            unlinkSync(p);
+          }
+        } catch {}
+      }
+    } catch {}
+  };
+  // Run once at startup, then on the interval
+  sweep();
+  return setInterval(sweep, intervalMs);
 }

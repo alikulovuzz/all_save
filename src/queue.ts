@@ -2,45 +2,50 @@ import { QueueItem } from "./types";
 
 export class DownloadQueue {
   private queue: QueueItem[] = [];
-  private processing = false;
+  private active = 0;
+  private readonly concurrency: number;
   private processor: (item: QueueItem) => Promise<void>;
 
-  constructor(processor: (item: QueueItem) => Promise<void>) {
+  constructor(processor: (item: QueueItem) => Promise<void>, concurrency = 1) {
     this.processor = processor;
+    this.concurrency = Math.max(1, concurrency);
   }
 
   enqueue(item: QueueItem): number {
     this.queue.push(item);
-    const position = this.queue.length;
-    if (!this.processing) {
-      this.processNext();
-    }
+    const position = this.active + this.queue.length;
+    this.fillSlots();
     return position;
   }
 
-  private async processNext(): Promise<void> {
-    if (this.queue.length === 0) {
-      this.processing = false;
-      return;
+  private fillSlots(): void {
+    while (this.active < this.concurrency && this.queue.length > 0) {
+      const item = this.queue.shift()!;
+      this.active++;
+      this.runOne(item);
     }
+  }
 
-    this.processing = true;
-    const item = this.queue.shift()!;
-
+  private async runOne(item: QueueItem): Promise<void> {
     try {
       await this.processor(item);
     } catch (err) {
       console.error("Queue processor error:", err);
+    } finally {
+      this.active--;
+      this.fillSlots();
     }
-
-    await this.processNext();
   }
 
   get isBusy(): boolean {
-    return this.processing;
+    return this.active > 0;
   }
 
   get length(): number {
     return this.queue.length;
+  }
+
+  get inFlight(): number {
+    return this.active;
   }
 }

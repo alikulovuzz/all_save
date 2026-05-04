@@ -33,6 +33,24 @@ export function extractUrl(text: string): string | null {
   return null;
 }
 
+export function isTikTok(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.replace(/^www\./, "");
+    return h === "tiktok.com" || h.endsWith(".tiktok.com");
+  } catch {
+    return false;
+  }
+}
+
+export function isInstagram(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.replace(/^www\./, "");
+    return h === "instagram.com" || h.endsWith(".instagram.com");
+  } catch {
+    return false;
+  }
+}
+
 export function isYouTube(url: string): boolean {
   try {
     const parsed = new URL(url);

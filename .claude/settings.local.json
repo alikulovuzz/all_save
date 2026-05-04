@@ -16,7 +16,28 @@
       "Bash(python -c:*)",
       "Bash(powershell -Command:*)",
       "Bash(docker:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(pm2 start *)",
+      "Bash(pm2 save *)",
+      "Bash(pm2 startup *)",
+      "Bash(pm2 logs *)",
+      "Bash(pip3 install *)",
+      "Bash(sudo apt-get *)",
+      "Bash(chmod +x /home/azamat/.local/bin/yt-dlp)",
+      "Bash(pm2 restart *)",
+      "Bash(sqlite3 data.db \"DELETE FROM downloads;\")",
+      "Bash(sqlite3 data.db \"SELECT COUNT\\(*\\) FROM downloads;\")",
+      "Bash(node *)",
+      "Bash(sudo docker *)",
+      "Bash(pm2 reload *)",
+      "Bash(chmod +x /home/azamat/.local/bin/gallery-dl)",
+      "Bash(/home/azamat/.local/bin/gallery-dl --version)",
+      "Bash(python3 -c \"import json,sys; r=json.load\\(sys.stdin\\); [print\\(a['name'], '->', a['browser_download_url']\\) for a in r.get\\('assets',[]\\)]\")",
+      "Bash(python3 *)",
+      "Bash(gallery-dl --simulate --range 1 https://www.instagram.com/p/DXqNWfwCiH2/)",
+      "Bash(gallery-dl --simulate --user-agent \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/120.0 Safari/537.36\" https://www.instagram.com/p/DXqNWfwCiH2/)",
+      "Bash(gallery-dl --simulate --proxy socks5://127.0.0.1:9050 https://www.instagram.com/p/DXqNWfwCiH2/)",
+      "Bash(gallery-dl --cookies /home/azamat/bots/all_save/instagram_cookies.txt --simulate \"https://www.instagram.com/p/DXqNWfwCiH2/\")"
     ]
   }
 }

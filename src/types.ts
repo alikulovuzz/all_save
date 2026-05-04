@@ -11,13 +11,15 @@ export interface DownloadRecord {
 export interface QueueItem {
   url: string;
   chatId: number;
-  statusMessageId: number;
+  statusMessageId?: number;
   formatId?: string;
+  replyTo?: number;
+  cacheKey?: string;
 }
 
 export interface DownloadResult {
   filePath: string;
-  mediaType: "video" | "audio" | "animation" | "document";
+  mediaType: "video" | "audio" | "animation" | "document" | "photo";
 }
 
 export interface VideoFormat {
