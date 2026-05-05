@@ -1,10 +1,13 @@
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import { promisify } from "util";
-import { join } from "path";
-import { unlink, unlinkSync, mkdirSync, existsSync, readdirSync, statSync, renameSync, rmdirSync } from "fs";
+import { join, dirname } from "path";
+import { unlink, unlinkSync, mkdirSync, existsSync, readdirSync, statSync, renameSync, rmdirSync, rmSync } from "fs";
 import { randomUUID } from "crypto";
 import { VideoFormat, DownloadResult } from "./types";
-import { isTikTok, isInstagram } from "./link-detector";
+import { isTikTok, isInstagram, isPinterest, isSoundCloud } from "./link-detector";
+import { log } from "./logger";
+
+export type ProgressCallback = (percent: number, downloaded: string, speed: string) => void;
 
 interface YtDlpFormat {
   format_id: string;
@@ -27,9 +30,16 @@ if (!existsSync(TEMP_DIR)) {
 }
 
 export async function listFormats(url: string): Promise<VideoFormat[]> {
-  const { stdout } = await execFileAsync("yt-dlp", ["-j", "--no-playlist", url], {
-    timeout: 30_000,
-  });
+  log.info("listFormats start", { url });
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync("yt-dlp", ["-j", "--no-playlist", url], {
+      timeout: 30_000,
+    }));
+  } catch (err) {
+    log.error("listFormats failed", { url, err });
+    throw err;
+  }
 
   const info = JSON.parse(stdout);
   const formats: YtDlpFormat[] = info.formats || [];
@@ -85,20 +95,38 @@ export async function downloadMedia(
   url: string,
   formatId?: string
 ): Promise<DownloadResult> {
+  // Pinterest: gallery-dl first, yt-dlp as fallback
+  if (isPinterest(url) && !formatId) {
+    try {
+      return await tryGalleryDl(url, randomUUID());
+    } catch {
+      // fall through to yt-dlp
+    }
+  }
+
   const uid = randomUUID();
   const outputTemplate = join(TEMP_DIR, `${uid}.%(ext)s`);
 
-  const args = [
-    "--no-playlist",
-    "--merge-output-format", "mp4",
-    "--remux-video", "mp4",
-    "--max-filesize", "2000m",
-    "-o", outputTemplate,
-  ];
+  const args = ["--no-playlist"];
 
-  if (formatId) {
-    // formatId is a complete yt-dlp format spec (e.g. "137+bestaudio" or "18")
-    args.push("-f", formatId);
+  if (isSoundCloud(url) && !formatId) {
+    args.push(
+      "--audio-quality", "0",
+      "--embed-thumbnail",
+      "--add-metadata",
+      "--max-filesize", "2000m",
+      "-o", outputTemplate,
+    );
+  } else {
+    args.push(
+      "--merge-output-format", "mp4",
+      "--remux-video", "mp4",
+      "--max-filesize", "2000m",
+      "-o", outputTemplate,
+    );
+    if (formatId) {
+      args.push("-f", formatId);
+    }
   }
 
   // Route only TikTok through the proxy (e.g. Tor) — other platforms work directly
@@ -153,6 +181,160 @@ export async function downloadMedia(
 
   const filePath = join(TEMP_DIR, completeFiles[0]);
   return { filePath, mediaType: detectMediaType(completeFiles[0]) };
+}
+
+// Parses yt-dlp --newline progress lines from stdout/stderr.
+// Examples:
+//   [download]  45.2% of 125.30MiB at 2.50MiB/s ETA 00:34
+//   [download] 100% of 125.30MiB in 00:50
+function parseProgress(line: string): { percent: number; downloaded: string; speed: string } | null {
+  const match = line.match(/\[download\]\s+([\d.]+)%\s+of\s+~?([\d.]+\w+)\s+at\s+([\d.]+\w+\/s)/);
+  if (match) {
+    return { percent: parseFloat(match[1]), downloaded: match[2], speed: match[3] };
+  }
+  const doneMatch = line.match(/\[download\]\s+100%\s+of\s+~?([\d.]+\w+)/);
+  if (doneMatch) {
+    return { percent: 100, downloaded: doneMatch[1], speed: "" };
+  }
+  return null;
+}
+
+export async function downloadMediaWithProgress(
+  url: string,
+  onProgress?: ProgressCallback,
+  formatId?: string
+): Promise<DownloadResult> {
+  // Pinterest: gallery-dl first, yt-dlp as fallback
+  if (isPinterest(url) && !formatId) {
+    try {
+      return await tryGalleryDl(url, randomUUID());
+    } catch {
+      // fall through to yt-dlp
+    }
+  }
+
+  return new Promise<DownloadResult>((resolve, reject) => {
+    const uid = randomUUID();
+    const subDir = join(TEMP_DIR, uid);
+    mkdirSync(subDir, { recursive: true });
+    const outputTemplate = join(subDir, "%(title)s.%(ext)s");
+
+    const args: string[] = [];
+
+    if (isSoundCloud(url) && !formatId) {
+      args.push(
+        "--no-playlist",
+        "--newline",
+        "--audio-quality", "0",
+        "--embed-thumbnail",
+        "--add-metadata",
+        "--max-filesize", "2000m",
+        "-o", outputTemplate,
+      );
+    } else if (formatId === "audio") {
+      args.push(
+        "--no-playlist",
+        "--newline",
+        "-x",
+        "--audio-format", "mp3",
+        "--audio-quality", "0",
+        "--embed-thumbnail",
+        "--add-metadata",
+        "--max-filesize", "2000m",
+        "-o", outputTemplate,
+      );
+    } else {
+      args.push(
+        "--no-playlist",
+        "--newline",
+        "--merge-output-format", "mp4",
+        "--remux-video", "mp4",
+        "--max-filesize", "2000m",
+        "-o", outputTemplate,
+      );
+      if (formatId) {
+        args.push("-f", formatId);
+      }
+    }
+
+    const proxy = process.env.YTDLP_PROXY;
+    if (proxy && isTikTok(url)) {
+      args.unshift("--proxy", proxy);
+    }
+
+    const igCookies = process.env.INSTAGRAM_COOKIES;
+    if (igCookies && isInstagram(url) && existsSync(igCookies)) {
+      args.unshift("--cookies", igCookies);
+    }
+
+    args.push(url);
+
+    log.info("yt-dlp spawn", { url, formatId, args: args.join(" ") });
+
+    const child = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
+
+    let stderrBuffer = "";
+
+    const handleLines = (text: string) => {
+      if (!onProgress) return;
+      for (const line of text.split("\n")) {
+        const progress = parseProgress(line);
+        if (progress) onProgress(progress.percent, progress.downloaded, progress.speed);
+      }
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => handleLines(chunk.toString()));
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderrBuffer += text;
+      handleLines(text);
+    });
+
+    const timer = setTimeout(() => {
+      child.kill();
+      log.error("yt-dlp timeout", { url, formatId, stderr: stderrBuffer });
+      reject(new Error("Download timed out after 120s"));
+    }, 120_000);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      log.info("yt-dlp close", { url, formatId, exitCode: code, stderr: stderrBuffer || "(none)" });
+
+      let allFiles: string[] = [];
+      try { allFiles = readdirSync(subDir); } catch {}
+      const completeFiles = allFiles.filter((f) => !f.endsWith(".part"));
+
+      for (const f of allFiles.filter((f) => f.endsWith(".part"))) {
+        try { unlinkSync(join(subDir, f)); } catch {}
+      }
+
+      if (completeFiles.length === 0) {
+        log.warn("yt-dlp no output, trying gallery-dl", { url, formatId });
+        tryGalleryDl(url, uid).then(resolve).catch(() => {
+          const detail = stderrBuffer
+            .split("\n")
+            .reverse()
+            .find((l) => l.startsWith("ERROR:")) || stderrBuffer;
+          const msg = detail ? detail.slice(0, 250) : "Download failed.";
+          log.error("gallery-dl also failed", { url, msg });
+          reject(new Error(msg));
+        });
+        return;
+      }
+
+      const filePath = join(subDir, completeFiles[0]);
+      const fileSize = (() => { try { return statSync(filePath).size; } catch { return 0; } })();
+      log.info("yt-dlp file ready", { url, formatId, filePath, fileSize });
+      resolve({ filePath, mediaType: detectMediaType(completeFiles[0]) });
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      log.error("yt-dlp spawn error", { url, formatId, err });
+      reject(err);
+    });
+  });
 }
 
 function detectMediaType(filename: string): DownloadResult["mediaType"] {
@@ -235,9 +417,11 @@ async function tryGalleryDl(url: string, uid: string): Promise<DownloadResult> {
 export async function cleanupFile(filePath: string): Promise<void> {
   try {
     await unlinkAsync(filePath);
-  } catch {
-    // swallow
-  }
+    const parent = dirname(filePath);
+    if (parent !== TEMP_DIR) {
+      try { rmdirSync(parent); } catch {}
+    }
+  } catch {}
 }
 
 // Sweep stale leftovers (orphaned .part files, files from a crash, etc.).
@@ -254,7 +438,11 @@ export function startTempSweep(
         try {
           const stat = statSync(p);
           if (now - stat.mtimeMs > maxAgeMs) {
-            unlinkSync(p);
+            if (stat.isDirectory()) {
+              rmSync(p, { recursive: true, force: true });
+            } else {
+              unlinkSync(p);
+            }
           }
         } catch {}
       }

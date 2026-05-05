@@ -15,6 +15,7 @@ export interface QueueItem {
   formatId?: string;
   replyTo?: number;
   cacheKey?: string;
+  userId?: number;
 }
 
 export interface DownloadResult {
