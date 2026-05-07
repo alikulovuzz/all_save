@@ -4,7 +4,7 @@ import { join, dirname } from "path";
 import { unlink, unlinkSync, mkdirSync, existsSync, readdirSync, statSync, renameSync, rmdirSync, rmSync } from "fs";
 import { randomUUID } from "crypto";
 import { VideoFormat, DownloadResult } from "./types";
-import { isTikTok, isInstagram, isPinterest, isSoundCloud } from "./link-detector";
+import { isTikTok, isInstagram, isPinterest, isSoundCloud, isYouTubeHost } from "./link-detector";
 import { log } from "./logger";
 
 export type ProgressCallback = (percent: number, downloaded: string, speed: string) => void;
@@ -31,9 +31,16 @@ if (!existsSync(TEMP_DIR)) {
 
 export async function listFormats(url: string): Promise<VideoFormat[]> {
   log.info("listFormats start", { url });
+  const listArgs: string[] = ["-j", "--no-playlist", "--js-runtimes", "node"];
+  const ytCookies = process.env.YOUTUBE_COOKIES;
+  if (ytCookies && isYouTubeHost(url) && existsSync(ytCookies)) {
+    listArgs.push("--cookies", ytCookies);
+  }
+  listArgs.push(url);
+
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync("yt-dlp", ["-j", "--no-playlist", url], {
+    ({ stdout } = await execFileAsync("yt-dlp", listArgs, {
       timeout: 30_000,
     }));
   } catch (err) {
@@ -57,10 +64,11 @@ export async function listFormats(url: string): Promise<VideoFormat[]> {
     const isVideoWithAudio = f.acodec !== "none" && f.vcodec !== "none";
     const isMp4 = (f.ext === "mp4" || f.video_ext === "mp4");
 
-    // Build complete yt-dlp format spec so audio is always included
+    // Build complete yt-dlp format spec with resolution-based fallback in case
+    // the exact format ID becomes unavailable between listFormats and download.
     const formatSpec = isVideoOnly
-      ? `${f.format_id}+bestaudio`
-      : String(f.format_id);
+      ? `${f.format_id}+bestaudio/bestvideo[height<=${f.height}]+bestaudio`
+      : `${f.format_id}/bestvideo[height<=${f.height}]+bestaudio`;
 
     if (!existing) {
       resolutionMap.set(resolution, {
@@ -140,6 +148,11 @@ export async function downloadMedia(
   const igCookies = process.env.INSTAGRAM_COOKIES;
   if (igCookies && isInstagram(url) && existsSync(igCookies)) {
     args.unshift("--cookies", igCookies);
+  }
+
+  const ytCookies = process.env.YOUTUBE_COOKIES;
+  if (ytCookies && isYouTubeHost(url) && existsSync(ytCookies)) {
+    args.unshift("--cookies", ytCookies);
   }
 
   args.push(url);
@@ -265,6 +278,17 @@ export async function downloadMediaWithProgress(
     const igCookies = process.env.INSTAGRAM_COOKIES;
     if (igCookies && isInstagram(url) && existsSync(igCookies)) {
       args.unshift("--cookies", igCookies);
+    }
+
+    const ytCookies = process.env.YOUTUBE_COOKIES;
+    if (ytCookies && isYouTubeHost(url) && existsSync(ytCookies)) {
+      args.unshift("--cookies", ytCookies);
+    }
+
+    // YouTube requires JS runtime to solve the n-parameter throttling challenge.
+    // Without this, yt-dlp falls back to image-only streams and all format downloads fail.
+    if (isYouTubeHost(url)) {
+      args.unshift("--js-runtimes", "node");
     }
 
     args.push(url);

@@ -101,6 +101,15 @@ export function isVimeo(url: string): boolean {
   }
 }
 
+export function isYouTubeHost(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.replace(/^www\./, "");
+    return h === "youtube.com" || h === "youtu.be" || h === "m.youtube.com";
+  } catch {
+    return false;
+  }
+}
+
 export function isYouTube(url: string): boolean {
   try {
     const parsed = new URL(url);

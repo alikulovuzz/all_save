@@ -37,7 +37,13 @@
       "Bash(gallery-dl --simulate --range 1 https://www.instagram.com/p/DXqNWfwCiH2/)",
       "Bash(gallery-dl --simulate --user-agent \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/120.0 Safari/537.36\" https://www.instagram.com/p/DXqNWfwCiH2/)",
       "Bash(gallery-dl --simulate --proxy socks5://127.0.0.1:9050 https://www.instagram.com/p/DXqNWfwCiH2/)",
-      "Bash(gallery-dl --cookies /home/azamat/bots/all_save/instagram_cookies.txt --simulate \"https://www.instagram.com/p/DXqNWfwCiH2/\")"
+      "Bash(gallery-dl --cookies /home/azamat/bots/all_save/instagram_cookies.txt --simulate \"https://www.instagram.com/p/DXqNWfwCiH2/\")",
+      "Bash(ssh -o StrictHostKeyChecking=accept-new -T git@gitlab.com)",
+      "Bash(git config *)",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }
