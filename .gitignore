@@ -4,3 +4,7 @@ temp
 db.config.json
 data.db
 .env
+instagram_cookies.txt
+*_cookies.txt
+data.db*
+logs/
