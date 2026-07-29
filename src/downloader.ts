@@ -51,7 +51,7 @@ export async function listFormats(url: string): Promise<VideoFormat[]> {
   const info = JSON.parse(stdout);
   const formats: YtDlpFormat[] = info.formats || [];
 
-  const resolutionMap = new Map<string, VideoFormat>();
+  const resolutionMap = new Map<string, VideoFormat & { isH264: boolean }>();
 
   for (const f of formats) {
     if (!f.height || f.height < 240) continue;
@@ -63,33 +63,37 @@ export async function listFormats(url: string): Promise<VideoFormat[]> {
     const isVideoOnly = f.vcodec !== "none" && f.acodec === "none";
     const isVideoWithAudio = f.acodec !== "none" && f.vcodec !== "none";
     const isMp4 = (f.ext === "mp4" || f.video_ext === "mp4");
+    // iOS requires H.264 (avc1) or H.265 — prefer those over VP9/AV1
+    const isH264 = f.vcodec?.startsWith("avc") ?? false;
 
     // Build complete yt-dlp format spec with resolution-based fallback in case
     // the exact format ID becomes unavailable between listFormats and download.
+    // Fallback chain prefers H.264+AAC for iOS compatibility.
     const formatSpec = isVideoOnly
-      ? `${f.format_id}+bestaudio/bestvideo[height<=${f.height}]+bestaudio`
-      : `${f.format_id}/bestvideo[height<=${f.height}]+bestaudio`;
+      ? `${f.format_id}+bestaudio[acodec^=mp4a]/bestvideo[height<=${f.height}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=${f.height}]+bestaudio`
+      : `${f.format_id}/bestvideo[height<=${f.height}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=${f.height}]+bestaudio`;
+
+    const entry = {
+      formatId: formatSpec,
+      resolution,
+      ext: f.ext || "mp4",
+      filesize: f.filesize || f.filesize_approx,
+      isH264,
+    };
 
     if (!existing) {
-      resolutionMap.set(resolution, {
-        formatId: formatSpec,
-        resolution,
-        ext: f.ext || "mp4",
-        filesize: f.filesize || f.filesize_approx,
-      });
+      resolutionMap.set(resolution, entry);
     } else {
-      if (isVideoWithAudio && isMp4) {
-        resolutionMap.set(resolution, {
-          formatId: formatSpec,
-          resolution,
-          ext: f.ext || "mp4",
-          filesize: f.filesize || f.filesize_approx,
-        });
+      // Prefer H.264 over VP9/AV1; among same codec, prefer combined video+audio over DASH
+      const upgradeToH264 = isH264 && !existing.isH264;
+      const sameCodecUpgrade = isH264 === existing.isH264 && isVideoWithAudio && isMp4;
+      if (upgradeToH264 || sameCodecUpgrade) {
+        resolutionMap.set(resolution, entry);
       }
     }
   }
 
-  const result = Array.from(resolutionMap.values());
+  const result = Array.from(resolutionMap.values()).map(({ isH264: _h, ...rest }) => rest);
   result.sort((a, b) => {
     const aH = parseInt(a.resolution);
     const bH = parseInt(b.resolution);
@@ -130,10 +134,19 @@ export async function downloadMedia(
       "--merge-output-format", "mp4",
       "--remux-video", "mp4",
       "--max-filesize", "2000m",
+      // Parallelize HLS fragment downloads — Twitter/etc. throttle per-connection, so serial
+      // fetching of a long video's fragments is what pushed large clips past the timeout.
+      "--concurrent-fragments", "8",
       "-o", outputTemplate,
     );
     if (formatId) {
       args.push("-f", formatId);
+    } else {
+      // Prefer H.264+AAC so iOS can play without re-encoding; fall back to best available
+      // Instagram/TikTok/etc. only have combined streams — include best[vcodec^=avc1] to match those.
+      // width<=?1920 skips oversized variants (e.g. Twitter's 2880-wide multi-GB HLS on long videos)
+      // that --max-filesize can't abort for m3u8; the `?` keeps formats whose width is unknown.
+        args.push("-f", "bestvideo[vcodec^=avc1][width<=?1920]+bestaudio[acodec^=mp4a]/best[vcodec^=avc1][width<=?1920][ext=mp4]/best[vcodec^=avc1][width<=?1920]/bestvideo[width<=?1920][ext=mp4]+bestaudio/bestvideo[width<=?1920]+bestaudio/bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[vcodec^=avc1]/best");
     }
   }
 
@@ -160,7 +173,7 @@ export async function downloadMedia(
   let ytdlpStderr: string | null = null;
   try {
     await execFileAsync("yt-dlp", args, {
-      timeout: 120_000,
+      timeout: 300_000,
     });
   } catch (err: unknown) {
     // yt-dlp may exit non-zero on max-filesize abort but still leave a complete file —
@@ -193,7 +206,7 @@ export async function downloadMedia(
   }
 
   const filePath = join(TEMP_DIR, completeFiles[0]);
-  return { filePath, mediaType: detectMediaType(completeFiles[0]) };
+  return ensureH264IfNeeded({ filePath, mediaType: detectMediaType(completeFiles[0]) });
 }
 
 // Parses yt-dlp --newline progress lines from stdout/stderr.
@@ -263,10 +276,19 @@ export async function downloadMediaWithProgress(
         "--merge-output-format", "mp4",
         "--remux-video", "mp4",
         "--max-filesize", "2000m",
+        // Parallelize HLS fragment downloads — Twitter/etc. throttle per-connection, so serial
+        // fetching of a long video's fragments is what pushed large clips past the timeout.
+        "--concurrent-fragments", "8",
         "-o", outputTemplate,
       );
       if (formatId) {
         args.push("-f", formatId);
+      } else {
+        // Prefer H.264+AAC so iOS can play without re-encoding; fall back to best available
+        // Instagram/TikTok/etc. only have combined streams — include best[vcodec^=avc1] to match those.
+        // width<=?1920 skips oversized variants (e.g. Twitter's 2880-wide multi-GB HLS on long videos)
+        // that --max-filesize can't abort for m3u8; the `?` keeps formats whose width is unknown.
+        args.push("-f", "bestvideo[vcodec^=avc1][width<=?1920]+bestaudio[acodec^=mp4a]/best[vcodec^=avc1][width<=?1920][ext=mp4]/best[vcodec^=avc1][width<=?1920]/bestvideo[width<=?1920][ext=mp4]+bestaudio/bestvideo[width<=?1920]+bestaudio/bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[vcodec^=avc1]/best");
       }
     }
 
@@ -318,8 +340,8 @@ export async function downloadMediaWithProgress(
     const timer = setTimeout(() => {
       child.kill();
       log.error("yt-dlp timeout", { url, formatId, stderr: stderrBuffer });
-      reject(new Error("Download timed out after 120s"));
-    }, 120_000);
+      reject(new Error("Download timed out after 300s"));
+    }, 300_000);
 
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -335,7 +357,7 @@ export async function downloadMediaWithProgress(
 
       if (completeFiles.length === 0) {
         log.warn("yt-dlp no output, trying gallery-dl", { url, formatId });
-        tryGalleryDl(url, uid).then(resolve).catch(() => {
+        tryGalleryDl(url, uid).then((r) => ensureH264IfNeeded(r).then(resolve).catch(() => resolve(r))).catch(() => {
           const detail = stderrBuffer
             .split("\n")
             .reverse()
@@ -350,7 +372,9 @@ export async function downloadMediaWithProgress(
       const filePath = join(subDir, completeFiles[0]);
       const fileSize = (() => { try { return statSync(filePath).size; } catch { return 0; } })();
       log.info("yt-dlp file ready", { url, formatId, filePath, fileSize });
-      resolve({ filePath, mediaType: detectMediaType(completeFiles[0]) });
+      ensureH264IfNeeded({ filePath, mediaType: detectMediaType(completeFiles[0]) })
+        .then(resolve)
+        .catch(() => resolve({ filePath, mediaType: detectMediaType(completeFiles[0]) }));
     });
 
     child.on("error", (err) => {
@@ -436,6 +460,53 @@ async function tryGalleryDl(url: string, uid: string): Promise<DownloadResult> {
   try { rmdirSync(subdir); } catch {}
 
   return { filePath: finalPath, mediaType: detectMediaType(first) };
+}
+
+// Probe the video codec and re-encode to H.264/AAC if iOS can't play it (VP9, AV1, etc.).
+// H.264 and HEVC files are returned as-is (no re-encode, fast path).
+async function ensureH264IfNeeded(result: DownloadResult): Promise<DownloadResult> {
+  if (result.mediaType !== "video") return result;
+
+  let codec = "";
+  try {
+    const { stdout } = await execFileAsync("ffprobe", [
+      "-v", "quiet",
+      "-select_streams", "v:0",
+      "-show_entries", "stream=codec_name",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      result.filePath,
+    ], { timeout: 15_000 });
+    codec = stdout.trim().toLowerCase();
+  } catch {
+    return result;
+  }
+
+  log.info("codec probe", { filePath: result.filePath, codec });
+
+  if (!codec || codec === "h264" || codec === "hevc") return result;
+
+  // VP9, AV1, or anything else: re-encode to H.264 so iOS can play it
+  const outputPath = result.filePath.replace(/(\.[^.]+)$/, "_h264.mp4");
+  log.info("re-encoding to H.264", { codec, outputPath });
+
+  try {
+    await execFileAsync("ffmpeg", [
+      "-i", result.filePath,
+      "-c:v", "libx264",
+      "-preset", "fast",
+      "-crf", "23",
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac",
+      "-movflags", "+faststart",
+      "-y",
+      outputPath,
+    ], { timeout: 300_000 });
+    try { unlinkSync(result.filePath); } catch {}
+    return { filePath: outputPath, mediaType: "video" };
+  } catch (err) {
+    log.error("re-encode failed, using original", { err });
+    return result;
+  }
 }
 
 export async function cleanupFile(filePath: string): Promise<void> {
