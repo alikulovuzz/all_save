@@ -6,7 +6,7 @@ import { query } from "./db";
 import { DownloadQueue } from "./queue";
 import { extractUrl, isYouTube, isVimeo, getPlatformName } from "./link-detector";
 import { listFormats, downloadMediaWithProgress, cleanupFile } from "./downloader";
-import { DownloadRecord, QueueItem } from "./types";
+import { DownloadRecord, QueueItem, VideoFormat } from "./types";
 import { log } from "./logger";
 import { classifyError, executeWithRetry, DEFAULT_RETRY_CONFIG } from "./retry";
 import {
@@ -21,8 +21,13 @@ import {
   getTopUsers,
 } from "./rate-limiter";
 
-// Pending YouTube selections: urlHash -> { url, chatId, userId }
-const pendingYouTube = new Map<string, { url: string; chatId: number; userId: number }>();
+// Pending YouTube selections: urlHash -> { url, chatId, userId, formats }
+// Buttons carry only a format index — yt-dlp format specs are far over
+// Telegram's 64-byte callback_data limit.
+const pendingYouTube = new Map<
+  string,
+  { url: string; chatId: number; userId: number; formats: VideoFormat[] }
+>();
 
 function hashUrl(url: string): string {
   return createHash("md5").update(url).digest("hex").slice(0, 12);
@@ -255,10 +260,17 @@ export function createBot(token: string, ownerId: number, cacheChatId: number, b
     const parts = data.split(":");
     if (parts.length !== 3) return;
 
-    const [, urlHash, formatId] = parts;
+    const [, urlHash, formatKey] = parts;
     const pending = pendingYouTube.get(urlHash);
 
     if (!pending) {
+      await ctx.answerCallbackQuery({ text: "Sessiya tugadi. Havolani qayta yuboring." });
+      return;
+    }
+
+    const formatId =
+      formatKey === "audio" ? "audio" : pending.formats[Number(formatKey)]?.formatId;
+    if (!formatId) {
       await ctx.answerCallbackQuery({ text: "Sessiya tugadi. Havolani qayta yuboring." });
       return;
     }
@@ -388,7 +400,7 @@ export function createBot(token: string, ownerId: number, cacheChatId: number, b
         }
 
         const urlHash = hashUrl(url);
-        pendingYouTube.set(urlHash, { url, chatId, userId });
+        pendingYouTube.set(urlHash, { url, chatId, userId, formats });
 
         const isOwner = chatId === ownerId;
         const keyboard = new InlineKeyboard();
@@ -403,7 +415,7 @@ export function createBot(token: string, ownerId: number, cacheChatId: number, b
           }
           if (tooLarge) continue;
 
-          keyboard.text(label, `dl:${urlHash}:${f.formatId}`);
+          keyboard.text(label, `dl:${urlHash}:${i}`);
           if ((i + 1) % 3 === 0) keyboard.row();
         }
 

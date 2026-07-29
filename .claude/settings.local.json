@@ -43,7 +43,13 @@
       "Bash(git remote *)",
       "Bash(git push *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(pm2 env *)",
+      "Read(//home/azamat/.nvm/versions/node/**)",
+      "Read(//home/azamat/**)",
+      "Bash(~/.nvm/versions/node/v22.19.0/bin/node *)",
+      "Bash(ffprobe -version)",
+      "Bash(gh auth *)"
     ]
   }
 }
